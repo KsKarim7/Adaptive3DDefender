@@ -6,7 +6,8 @@ mvtec3d_classes = ['bagel', 'cable_gland', 'carrot', 'cookie', 'dowel',
                    'foam', 'peach', 'potato', 'rope', 'tire']
 
 
-MVTEC3D_DIR = '../anomaly_detection/mvtec3d'
+# MVTEC3D_DIR = '/home/p3766/mvtec3d'
+MVTEC3D_DIR = "/home/p3766/mvtec3d"
 
 
 def load_mvtec3d(category, k_shot, missing_type, missing_rate=0.3):

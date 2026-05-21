@@ -1,3 +1,4 @@
+class_mapping = {}
 from builtins import print
 import torch
 import random

@@ -1,0 +1,44 @@
+
+cat > .gitignore << 'EOF'
+# Environment
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Data & Results (Large files)
+result/
+wandb/
+*.arrow
+*.pt
+*.pth
+*.ckpt
+mvtec3d/
+datasets/mvtec3d/
+
+# Logs
+*.log
+logs/
+
+# OS & Editor
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Large build files
+Pointnet2_PyTorch/build/
+Pointnet2_PyTorch/dist/
+*.whl
+
+# Conda / Pip
+*.egg-info/
+.pip/
+EOF
