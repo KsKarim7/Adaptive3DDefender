@@ -166,6 +166,24 @@ class PromptLearner(nn.Module):
 def _get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
 
+class CorrelatedPromptMLP(nn.Module):
+    """DCP-style intra-modal hierarchical prompt correlation.
+    Initialized near-zero so training starts from baseline behavior.
+    """
+    def __init__(self, dim, reduction=16):
+        super().__init__()
+        self.fc1 = nn.Linear(dim, dim // reduction)
+        self.fc2 = nn.Linear(dim // reduction, dim)
+        self.ln  = nn.LayerNorm(dim)
+        nn.init.xavier_uniform_(self.fc1.weight, gain=0.01)
+        nn.init.zeros_(self.fc1.bias)
+        nn.init.xavier_uniform_(self.fc2.weight, gain=0.01)
+        nn.init.zeros_(self.fc2.bias)
+
+    def forward(self, x):
+        return self.ln(self.fc2(F.gelu(self.fc1(x))))
+
+
 class Missing_PromptLearner(nn.Module):
     def __init__(self, prompt_length, prompt_depth):
         super().__init__()
@@ -210,6 +228,10 @@ class Missing_PromptLearner(nn.Module):
                 nn.Linear(embed_dim_depth//r, embed_dim_depth),
                 )
 
+        # DCP-style intra-modal self-correlation MLPs (one per layer, per modality)
+        self.correlated_prompt_image = _get_clones(CorrelatedPromptMLP(embed_dim_image), self.prompt_depth)
+        self.correlated_prompt_depth = _get_clones(CorrelatedPromptMLP(embed_dim_depth), self.prompt_depth)
+
     def forward(self, missing_type):
 
         # Before returning, need to transform
@@ -235,10 +257,16 @@ class Missing_PromptLearner(nn.Module):
             all_prompts_depth[0].append(self.compound_prompt_projections_depth[0](self.layernorm_depth[0](torch.cat([initial_prompt_image, initial_prompt_depth], -1))))
             # generate the prompts of the rest layers
             for index in range(1, self.prompt_depth):
-                all_prompts_image[index].append(
-                    self.compound_prompt_projections_image[index](self.layernorm_image[index](torch.cat([all_prompts_image[index-1][-1], all_prompts_depth[index-1][-1]], -1))))
-                all_prompts_depth[index].append(
-                    self.compound_prompt_projections_depth[index](self.layernorm_depth[index](torch.cat([all_prompts_image[index-1][-1], all_prompts_depth[index-1][-1]], -1))))
+                # Original cross-modal projection (MISDD-MM baseline)
+                cross_image = self.compound_prompt_projections_image[index](
+                    self.layernorm_image[index](torch.cat([all_prompts_image[index-1][-1], all_prompts_depth[index-1][-1]], -1)))
+                cross_depth = self.compound_prompt_projections_depth[index](
+                    self.layernorm_depth[index](torch.cat([all_prompts_image[index-1][-1], all_prompts_depth[index-1][-1]], -1)))
+                # DCP-style intra-modal self-correlation (residual addition)
+                corr_image = self.correlated_prompt_image[index](all_prompts_image[index-1][-1])
+                corr_depth = self.correlated_prompt_depth[index](all_prompts_depth[index-1][-1])
+                all_prompts_image[index].append(cross_image + corr_image)
+                all_prompts_depth[index].append(cross_depth + corr_depth)
             all_prompts_image[0][i] = torch.cat([all_prompts_image[0][i], self.common_prompt_projection_image(common_prompt)], 0)
             all_prompts_depth[0][i] = torch.cat([all_prompts_depth[0][i], self.common_prompt_projection_depth(common_prompt)], 0)
         # generate the prompts in each layer as a tensor [B, L, C]
