@@ -111,7 +111,7 @@ def fit(model,
             # normal_text_prompt, abnormal_text_prompt_manual, abnormal_text_prompt_learned = model.prompt_learner()
             img_normal_text_prompt, img_abnormal_text_prompt_manual, img_abnormal_text_prompt_learned = model.img_prompt_learner()
             depth_normal_text_prompt, depth_abnormal_text_prompt_manual, depth_abnormal_text_prompt_learned = model.depth_prompt_learner()
-            all_prompts_image, all_prompts_depth = model.missing_prompt_learner(missing_flag)
+            all_prompts_image, all_prompts_depth = model.missing_prompt_learner(missing_flag, raw_image=img, raw_depth=depth)
 
             optimizer.zero_grad()
 
@@ -191,7 +191,7 @@ def fit(model,
             img = torch.stack(img, dim=0)
             # pc = torch.stack(pc, dim=0)
             depth = torch.stack(depth, dim=0)
-            all_prompts_image, all_prompts_depth = model.missing_prompt_learner(missing_flag)
+            all_prompts_image, all_prompts_depth = model.missing_prompt_learner(missing_flag, raw_image=img, raw_depth=depth)
 
             for d, t, n, l, m in zip(img, depth, name, label, mask):
                 test_imgs += [denormalization(d.cpu().numpy())]

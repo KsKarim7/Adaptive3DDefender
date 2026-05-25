@@ -166,6 +166,34 @@ class PromptLearner(nn.Module):
 def _get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
 
+
+class DynamicPromptGenerator(nn.Module):
+    """Innovation 2: Input-conditioned dynamic prompt adjustment.
+    Takes raw input tensor, produces a sample-specific prompt residual.
+    Near-zero init ensures training starts from baseline behavior.
+    """
+    def __init__(self, in_channels=3, prompt_length=12, prompt_dim=896):
+        super().__init__()
+        self.prompt_length = prompt_length
+        self.prompt_dim = prompt_dim
+        self.pool = nn.AdaptiveAvgPool2d(4)
+        spatial_feat = 4 * 4 * in_channels
+        hidden = spatial_feat * 4
+        self.fc1 = nn.Linear(spatial_feat, hidden)
+        self.fc2 = nn.Linear(hidden, prompt_dim)
+        self.ln  = nn.LayerNorm(prompt_dim)
+        nn.init.xavier_uniform_(self.fc1.weight, gain=0.01)
+        nn.init.zeros_(self.fc1.bias)
+        nn.init.xavier_uniform_(self.fc2.weight, gain=0.01)
+        nn.init.zeros_(self.fc2.bias)
+
+    def forward(self, x):
+        if x.dim() == 3:
+            x = x.unsqueeze(0)
+        pooled = self.pool(x).flatten(1)
+        out = self.ln(self.fc2(F.gelu(self.fc1(pooled))))
+        return out.expand(self.prompt_length, -1)
+
 class CorrelatedPromptMLP(nn.Module):
     """DCP-style intra-modal hierarchical prompt correlation.
     Initialized near-zero so training starts from baseline behavior.
@@ -231,8 +259,11 @@ class Missing_PromptLearner(nn.Module):
         # DCP-style intra-modal self-correlation MLPs (one per layer, per modality)
         self.correlated_prompt_image = _get_clones(CorrelatedPromptMLP(embed_dim_image), self.prompt_depth)
         self.correlated_prompt_depth = _get_clones(CorrelatedPromptMLP(embed_dim_depth), self.prompt_depth)
+        # Innovation 2: dynamic input-conditioned prompt generators
+        self.dynamic_image_gen = DynamicPromptGenerator(3, prompt_length_half, embed_dim_image)
+        self.dynamic_depth_gen = DynamicPromptGenerator(3, prompt_length_half, embed_dim_depth)
 
-    def forward(self, missing_type):
+    def forward(self, missing_type, raw_image=None, raw_depth=None):
 
         # Before returning, need to transform
         # prompts to 768 for the visual side
@@ -253,8 +284,17 @@ class Missing_PromptLearner(nn.Module):
                 initial_prompt_depth = self.depth_prompt_missing
                 common_prompt = self.common_prompt_image
             # generate the prompts of the first layer
-            all_prompts_image[0].append(self.compound_prompt_projections_image[0](self.layernorm_image[0](torch.cat([initial_prompt_image, initial_prompt_depth], -1))))
-            all_prompts_depth[0].append(self.compound_prompt_projections_depth[0](self.layernorm_depth[0](torch.cat([initial_prompt_image, initial_prompt_depth], -1))))
+            base_image = self.compound_prompt_projections_image[0](self.layernorm_image[0](torch.cat([initial_prompt_image, initial_prompt_depth], -1)))
+            base_depth = self.compound_prompt_projections_depth[0](self.layernorm_depth[0](torch.cat([initial_prompt_image, initial_prompt_depth], -1)))
+            # Innovation 2: add dynamic input-conditioned residual if raw inputs available
+            if raw_image is not None:
+                dyn_image = self.dynamic_image_gen(raw_image[i].float().to(base_image.device))
+                base_image = base_image + dyn_image
+            if raw_depth is not None:
+                dyn_depth = self.dynamic_depth_gen(raw_depth[i].float().to(base_depth.device))
+                base_depth = base_depth + dyn_depth
+            all_prompts_image[0].append(base_image)
+            all_prompts_depth[0].append(base_depth)
             # generate the prompts of the rest layers
             for index in range(1, self.prompt_depth):
                 # Original cross-modal projection (MISDD-MM baseline)
