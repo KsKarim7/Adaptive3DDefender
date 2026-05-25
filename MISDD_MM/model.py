@@ -167,6 +167,77 @@ def _get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
 
 
+
+class GranularTextGuidance(nn.Module):
+    """Innovation 3: Multi-granularity text guidance.
+    Pre-computes coarse/mid/fine text embeddings for a class.
+    Used as auxiliary alignment signal during training.
+    Near-zero projection weight ensures minimal disruption at start.
+    """
+    def __init__(self, clip_model, classname, precision='fp32'):
+        super().__init__()
+        dtype = torch.float32
+        self.classname = classname
+
+        from .ad_prompts import class_state_granular
+        granular = class_state_granular.get(classname, {
+            'coarse': ['{} with defect'],
+            'mid':    ['{} with crack'],
+            'fine':   ['{} with surface defect at edge']
+        })
+
+        def encode_texts(templates):
+            prompts = ["a photo of a " + t.format(classname) + "." for t in templates]
+            tokens = CLIPAD.tokenize(prompts)
+            device = next(clip_model.parameters()).device
+            tokens = tokens.to(device)
+            with torch.no_grad():
+                emb = clip_model.encode_text(tokens)
+            return F.normalize(emb.float(), dim=-1).mean(0)
+
+        self.register_buffer('coarse_text', encode_texts(granular['coarse']))
+        self.register_buffer('mid_text',    encode_texts(granular['mid']))
+        self.register_buffer('fine_text',   encode_texts(granular['fine']))
+
+        # Lightweight projection: visual prompt dim → text embedding dim
+        visual_dim = 896
+        text_dim = clip_model.text_projection.shape[1] if hasattr(clip_model, 'text_projection') and clip_model.text_projection is not None else 512
+        self.proj_coarse = nn.Linear(visual_dim, text_dim)
+        self.proj_mid    = nn.Linear(visual_dim, text_dim)
+        self.proj_fine   = nn.Linear(visual_dim, text_dim)
+        # Near-zero init
+        for proj in [self.proj_coarse, self.proj_mid, self.proj_fine]:
+            nn.init.xavier_uniform_(proj.weight, gain=0.01)
+            nn.init.zeros_(proj.bias)
+
+    def compute_alignment_loss(self, prompts_image, prompts_depth):
+        """
+        prompts_image: list of length prompt_depth, each [B, L, C]
+        Returns scalar auxiliary loss encouraging layer-depth text alignment
+        """
+        depth = len(prompts_image)
+        loss = torch.tensor(0.0, device=prompts_image[0].device)
+
+        for layer_idx in range(depth):
+            p_img = prompts_image[layer_idx].mean(dim=1).mean(dim=0)
+            p_dep = prompts_depth[layer_idx].mean(dim=1).mean(dim=0)
+            visual = (p_img + p_dep) / 2.0
+
+            if layer_idx < depth // 3:
+                proj = self.proj_coarse
+                text  = self.coarse_text.to(visual.device)
+            elif layer_idx < 2 * depth // 3:
+                proj = self.proj_mid
+                text  = self.mid_text.to(visual.device)
+            else:
+                proj = self.proj_fine
+                text  = self.fine_text.to(visual.device)
+
+            v_proj = F.normalize(proj(visual), dim=-1)
+            loss = loss + (1.0 - (v_proj * text).sum())
+
+        return loss / depth
+
 class DynamicPromptGenerator(nn.Module):
     """Innovation 2: Input-conditioned dynamic prompt adjustment.
     Takes raw input tensor, produces a sample-specific prompt residual.
@@ -422,6 +493,8 @@ class MISDD_MM(torch.nn.Module):
         self.depth_tokenized_abnormal_prompts_manual = self.depth_prompt_learner.tokenized_abnormal_prompts_manual
         self.depth_tokenized_abnormal_prompts_learned = self.depth_prompt_learner.tokenized_abnormal_prompts_learned
         self.depth_tokenized_abnormal_prompts = torch.cat([self.depth_tokenized_abnormal_prompts_manual, self.depth_tokenized_abnormal_prompts_learned], dim=0)
+        # Innovation 3: granular text guidance module
+        self.granular_text_guidance = GranularTextGuidance(model, class_name, self.precision)
 
         self.average = torch.nn.AvgPool2d(3, stride=1) # torch.nn.AvgPool2d(1, stride=1) #
         self.resize = torch.nn.AdaptiveAvgPool2d((self.grid_size[0], self.grid_size[1]))
