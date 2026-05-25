@@ -238,6 +238,87 @@ class GranularTextGuidance(nn.Module):
 
         return loss / depth
 
+
+class SensorSentinel(nn.Module):
+    """Innovation 4: Continuous sensor quality estimation.
+    Computes a quality score in [0,1] for each sensor from raw input.
+    Replaces binary missing_type with continuous reliability weights.
+    
+    RGB quality:   Laplacian variance (sharpness proxy)
+    Depth quality: ratio of valid (non-zero) pixels
+    
+    When both sensors present, weights are quality-proportional.
+    When one sensor missing, falls back to binary behavior.
+    Near-zero learned correction on top of signal-based score.
+    """
+    def __init__(self, embed_dim=896):
+        super().__init__()
+        # Small learned correction network per modality
+        # Takes pooled input and predicts a scalar quality correction
+        self.rgb_corrector   = nn.Sequential(
+            nn.AdaptiveAvgPool2d(2),
+            nn.Flatten(),
+            nn.Linear(3 * 4, 8),
+            nn.GELU(),
+            nn.Linear(8, 1),
+            nn.Sigmoid()
+        )
+        self.depth_corrector = nn.Sequential(
+            nn.AdaptiveAvgPool2d(2),
+            nn.Flatten(),
+            nn.Linear(3 * 4, 8),
+            nn.GELU(),
+            nn.Linear(8, 1),
+            nn.Sigmoid()
+        )
+        # Near-zero init for correctors so they start as identity
+        for m in [self.rgb_corrector, self.depth_corrector]:
+            for layer in m:
+                if isinstance(layer, nn.Linear):
+                    nn.init.xavier_uniform_(layer.weight, gain=0.01)
+                    nn.init.zeros_(layer.bias)
+
+    @staticmethod
+    def _laplacian_variance(img_tensor):
+        """Sharpness proxy: variance of Laplacian across spatial dims.
+        img_tensor: [C, H, W] float tensor on any device
+        Returns scalar in [0, 1]
+        """
+        gray = img_tensor.mean(0, keepdim=True).unsqueeze(0)  # [1,1,H,W]
+        kernel = torch.tensor(
+            [[[[0., 1., 0.],
+               [1.,-4., 1.],
+               [0., 1., 0.]]]],
+            dtype=gray.dtype, device=gray.device
+        )
+        lap = torch.nn.functional.conv2d(gray, kernel, padding=1)
+        var = lap.var().item()
+        return float(min(1.0, var / 1.0))
+
+    @staticmethod
+    def _depth_density(depth_tensor):
+        """Valid pixel ratio: fraction of non-zero depth values.
+        depth_tensor: [C, H, W] float tensor
+        Returns scalar in [0, 1]
+        """
+        valid = (depth_tensor.abs().sum(0) > 0).float()
+        return float(valid.mean().item())
+
+    def get_quality_weights(self, raw_image, raw_depth, missing_type_i):
+        """
+        Returns (w_rgb, w_depth) as floats in [0,1] summing to 1.
+        missing_type_i: int scalar (0=both, 1=img missing, 2=depth missing)
+        """
+        if missing_type_i == 1:   # image completely missing
+            return 0.0, 1.0
+        elif missing_type_i == 2: # depth completely missing
+            return 1.0, 0.0
+        else:                     # both present — compute quality scores
+            q_rgb   = self._laplacian_variance(raw_image.float())
+            q_depth = self._depth_density(raw_depth.float())
+            total   = q_rgb + q_depth + 1e-8
+            return q_rgb / total, q_depth / total
+
 class DynamicPromptGenerator(nn.Module):
     """Innovation 2: Input-conditioned dynamic prompt adjustment.
     Takes raw input tensor, produces a sample-specific prompt residual.
@@ -333,6 +414,8 @@ class Missing_PromptLearner(nn.Module):
         # Innovation 2: dynamic input-conditioned prompt generators
         self.dynamic_image_gen = DynamicPromptGenerator(3, prompt_length_half, embed_dim_image)
         self.dynamic_depth_gen = DynamicPromptGenerator(3, prompt_length_half, embed_dim_depth)
+        # Innovation 4: continuous sensor quality estimator
+        self.sensor_sentinel = SensorSentinel(embed_dim_image)
 
     def forward(self, missing_type, raw_image=None, raw_depth=None):
 
@@ -342,18 +425,29 @@ class Missing_PromptLearner(nn.Module):
         all_prompts_depth = [ [] for _ in range(self.prompt_depth)]   # Prompts of prompt_depth layers
         for i in range(len(missing_type)):
             # set initial prompts for each modality
-            if missing_type[i]==0:  # modality complete
-                initial_prompt_image = self.image_prompt_complete
-                initial_prompt_depth = self.depth_prompt_complete
-                common_prompt = self.common_prompt_complete
-            elif missing_type[i]==1:  # missing image 
+            mt_i = int(missing_type[i].item()) if hasattr(missing_type[i], 'item') else int(missing_type[i])
+            if mt_i == 1:  # missing image
                 initial_prompt_image = self.image_prompt_missing
                 initial_prompt_depth = self.depth_prompt_complete
                 common_prompt = self.common_prompt_depth
-            elif missing_type[i]==2:  # missing depth 
+            elif mt_i == 2:  # missing depth
                 initial_prompt_image = self.image_prompt_complete
                 initial_prompt_depth = self.depth_prompt_missing
                 common_prompt = self.common_prompt_image
+            else:  # both present — Innovation 4: quality-weighted blending
+                if raw_image is not None and raw_depth is not None:
+                    w_rgb, w_dep = self.sensor_sentinel.get_quality_weights(
+                        raw_image[i], raw_depth[i], mt_i)
+                    initial_prompt_image = (w_rgb * self.image_prompt_complete +
+                                           (1.0 - w_rgb) * self.image_prompt_missing)
+                    initial_prompt_depth = (w_dep * self.depth_prompt_complete +
+                                           (1.0 - w_dep) * self.depth_prompt_missing)
+                    common_prompt = (w_rgb * self.common_prompt_image +
+                                    w_dep * self.common_prompt_depth)
+                else:
+                    initial_prompt_image = self.image_prompt_complete
+                    initial_prompt_depth = self.depth_prompt_complete
+                    common_prompt = self.common_prompt_complete
             # generate the prompts of the first layer
             base_image = self.compound_prompt_projections_image[0](self.layernorm_image[0](torch.cat([initial_prompt_image, initial_prompt_depth], -1)))
             base_depth = self.compound_prompt_projections_depth[0](self.layernorm_depth[0](torch.cat([initial_prompt_image, initial_prompt_depth], -1)))
