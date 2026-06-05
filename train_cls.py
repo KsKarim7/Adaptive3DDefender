@@ -157,7 +157,13 @@ def fit(model,
             depth_trip_loss = criterion_tip(depth_feature, depth_normal_text_features_ahchor, depth_abnormal_text_features_ahchor)
             depth_loss = depth_loss_v2t + depth_trip_loss + depth_loss_match_abnormal * args.lambda1
             
-            loss = args.img_lambda * img_loss + args.depth_lambda * depth_loss
+            if hasattr(model, 'missing_prompt_learner') and hasattr(model, 'granular_text_guidance'):
+                granular_loss = model.granular_text_guidance.compute_alignment_loss(
+                    all_prompts_image, all_prompts_depth)
+                loss = args.img_lambda * img_loss + args.depth_lambda * depth_loss + 0.1 * granular_loss
+            else:
+                loss = args.img_lambda * img_loss + args.depth_lambda * depth_loss
+                granular_loss = None
 
             wandb.log({
                 'loss': loss.item(), 
@@ -166,7 +172,8 @@ def fit(model,
                 'depth_loss_v2t': depth_loss_v2t.item(), 
                 'depth_trip_loss': depth_trip_loss.item(), 
                 'img_loss_match_abnormal': img_loss_match_abnormal.item(),
-                'depth_loss_match_abnormal': depth_loss_match_abnormal.item()
+                'depth_loss_match_abnormal': depth_loss_match_abnormal.item(),
+                'granular_loss': granular_loss.item() if granular_loss is not None else 0.0
             })
 
             loss.backward()
@@ -285,7 +292,7 @@ def str2bool(v):
 
 def get_args():
     parser = argparse.ArgumentParser(description='Anomaly detection')
-    parser.add_argument('--dataset', type=str, default='mvtec', choices=['mvtec', 'visa', 'mvtec3d'])
+    parser.add_argument('--dataset', type=str, default='mvtec', choices=['mvtec', 'visa', 'mvtec3d', 'eyescandies'])
     parser.add_argument('--class_name', type=str, default='carpet')
 
     parser.add_argument('--img-resize', type=int, default=240)
