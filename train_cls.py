@@ -221,14 +221,20 @@ def fit(model,
 
         test_imgs, test_depths, score_maps, gt_mask_list = specify_resolution(test_imgs, test_depths, score_maps, gt_mask_list, resolution=(args.resolution, args.resolution))
         result_dict = metric_cal_img(np.array(scores_img), gt_list, np.array(score_maps))
+        try:
+            pix_result_dict = metric_cal_pix(np.array(score_maps), gt_mask_list)
+            result_dict.update(pix_result_dict)
+        except Exception as e:
+            result_dict['p_roc'] = 0.0
+            result_dict['pro_auc'] = 0.0
 
         if best_result_dict is None:
-            print(f'===========================Image-AUROC: {result_dict["i_roc"]}')
+            print(f'===========================Image-AUROC: {result_dict["i_roc"]:.2f} | P-AUROC: {result_dict.get("p_roc", 0):.2f} | AUPRO: {result_dict.get("pro_auc", 0):.2f}')
             save_check_point(model, check_path)
             best_result_dict = result_dict
 
         elif best_result_dict['i_roc'] < result_dict['i_roc']:
-            print(f'===========================Image-AUROC: {result_dict["i_roc"]}')
+            print(f'===========================Image-AUROC: {result_dict["i_roc"]:.2f} | P-AUROC: {result_dict.get("p_roc", 0):.2f} | AUPRO: {result_dict.get("pro_auc", 0):.2f}')
             save_check_point(model, check_path)
             best_result_dict = result_dict
 

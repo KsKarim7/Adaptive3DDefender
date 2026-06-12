@@ -438,16 +438,12 @@ class Missing_PromptLearner(nn.Module):
                 if raw_image is not None and raw_depth is not None:
                     w_rgb, w_dep = self.sensor_sentinel.get_quality_weights(
                         raw_image[i], raw_depth[i], mt_i)
-                    initial_prompt_image = (w_rgb * self.image_prompt_complete +
-                                           (1.0 - w_rgb) * self.image_prompt_missing)
-                    initial_prompt_depth = (w_dep * self.depth_prompt_complete +
-                                           (1.0 - w_dep) * self.depth_prompt_missing)
-                    common_prompt = (w_rgb * self.common_prompt_image +
-                                    w_dep * self.common_prompt_depth)
+                    initial_prompt_image = w_rgb * self.image_prompt_complete + (1.0 - w_rgb) * self.image_prompt_missing
+                    initial_prompt_depth = w_dep * self.depth_prompt_complete + (1.0 - w_dep) * self.depth_prompt_missing
                 else:
                     initial_prompt_image = self.image_prompt_complete
                     initial_prompt_depth = self.depth_prompt_complete
-                    common_prompt = self.common_prompt_complete
+                common_prompt = self.common_prompt_complete
             # generate the prompts of the first layer
             base_image = self.compound_prompt_projections_image[0](self.layernorm_image[0](torch.cat([initial_prompt_image, initial_prompt_depth], -1)))
             base_depth = self.compound_prompt_projections_depth[0](self.layernorm_depth[0](torch.cat([initial_prompt_image, initial_prompt_depth], -1)))
